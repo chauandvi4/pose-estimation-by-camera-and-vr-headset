@@ -13,7 +13,6 @@ It allows you to:
 ## System Architecture
 
 
-
 ## Installation
 
 1. Setup Python env:
