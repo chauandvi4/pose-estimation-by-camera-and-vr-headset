@@ -18,6 +18,7 @@ from typing import Set
 WEBSOCKET_HOST = "0.0.0.0"
 WEBSOCKET_PORT = 8765
 CAM_INDEX = 0 
+MODEL_COMPLEXITY = 1 # 0,1,2 (higher -> more accurate/slower)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("pose_stream_server")
@@ -29,7 +30,7 @@ mp_pose = mp.solutions.pose
 
 pose = mp_pose.Pose(
     static_image_mode=False,
-    model_complexity=1, # 0,1,2 (higher -> more accurate/slower)
+    model_complexity=MODEL_COMPLEXITY, 
     enable_segmentation=False,
     min_detection_confidence=0.5,
     min_tracking_confidence=0.5
@@ -53,13 +54,12 @@ async def video_loop():
                 await asyncio.sleep(0.1)
                 continue
 
-            # To improve performance, optionally mark the image as not writeable to
-            # pass by reference.
+            # To improve performance, optionally mark the image as not writeable to pass by reference.
             image.flags.writeable = False
             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             results = pose.process(image)
             
-            #Sending landmarks to connected WebSocket client
+            #Sending landmarks to connected websocket clients
             landmarks_out = None
             if results.pose_landmarks and results.pose_world_landmarks:
                 landmarks_2d = []
@@ -112,9 +112,9 @@ async def ws_handler(ws, path):
     logger.info("Client connected: %s", ws.remote_address)
     connected_clients.add(ws)
     try:
-        # Keep connection open; we don't expect messages from clients right now
+        # Keep connection open as we don't expect messages from clients right now
         async for message in ws:
-            # If client sends something (like ping/cmd) we can handle here
+            # TO-DO: Message received from clients can be handled here
             logger.debug("Received from client: %s", message)
     except websockets.exceptions.ConnectionClosed:
         logger.info("Client disconnected: %s", ws.remote_address)
