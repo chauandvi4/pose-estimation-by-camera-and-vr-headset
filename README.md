@@ -25,6 +25,6 @@ pip install -r requirements.txt
 
 2. Run Python server:
 ```
-python python_server/pose_stream_server.py
+python pose_stream_server/pose_stream_server.py
 ```
 
