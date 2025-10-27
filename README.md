@@ -12,8 +12,19 @@ It allows you to:
 
 ## System Architecture
 
-<TBU>
+
 
 ## Installation
 
-<TBU>
+1. Setup Python env:
+```
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+2. Run Python server:
+```
+python python_server/pose_stream_server.py
+```
+

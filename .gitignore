@@ -1,4 +1,34 @@
-# Byte-compiled / optimized / DLL files
+# Python
 __pycache__/
+*.pyc
+*.pyo
+.Python
+.env
+.venv/
+.venv/*
+venv/
+.envrc
 
+# OS
+.DS_Store
+Thumbs.db
+
+# logs / outputs
+*.log
+*.sqlite3
+
+# Unity
+Library/
+Temp/
+Obj/
+Build/
+Builds/
+UserSettings/
+*.csproj
+*.unitypackage
+
+# VSCode
+.vscode/
+
+# macOS
 .DS_Store
