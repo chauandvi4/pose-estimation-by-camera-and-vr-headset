@@ -62,30 +62,28 @@ async def video_loop():
             #Sending landmarks to connected websocket clients
             landmarks_out = None
             if results.pose_landmarks and results.pose_world_landmarks:
-                landmarks_2d = []
-                for idx, lm in enumerate(results.pose_landmarks.landmark):
-                    landmarks_2d.append({
+                landmarks_out = []
+                world_out = []
+                for idx, (lm_img, lm_world) in enumerate(zip(results.pose_landmarks.landmark, results.pose_world_landmarks.landmark)):
+                    landmarks_out.append({
                         "id": idx,
-                        "x": float(lm.x),
-                        "y": float(lm.y),
-                        "z": float(lm.z),
-                        "visibility": float(lm.visibility)
+                        "x": float(lm_img.x),
+                        "y": float(lm_img.y),
+                        "z": float(lm_img.z),
+                        "visibility": float(lm_img.visibility)
                     })
-
-                landmarks_3d = []
-                for idx, lm in enumerate(results.pose_world_landmarks.landmark):
-                    landmarks_3d.append({
+                    world_out.append({
                         "id": idx,
-                        "x": float(lm.x),
-                        "y": float(lm.y),
-                        "z": float(lm.z),
-                        "visibility": float(lm.visibility)
+                        "x": float(lm_world.x),
+                        "y": float(lm_world.y),
+                        "z": float(lm_world.z),
+                        "visibility": float(lm_img.visibility)
                     })
 
                 payload = json.dumps({
                     "timestamp": asyncio.get_event_loop().time(),
-                    "pose_landmarks": landmarks_2d,
-                    "pose_world_landmarks": landmarks_3d
+                    "pose_landmarks": landmarks_out,
+                    "pose_world_landmarks": world_out
                 })
 
                 # Broadcast

@@ -13,52 +13,72 @@ public class Landmark {
 [Serializable]
 public class PoseMessage {
     public double timestamp;
+    public List<Landmark> pose_landmarks;
     public List<Landmark> pose_world_landmarks;
 }
 
 public class PoseReceiver : MonoBehaviour {
-    public string serverUrl = "ws://192.168.1.100:8765"; // your PC’s IP & port
+    public string serverUrl = "ws://localhost:8765";
     private WebSocket websocket;
 
     public Transform[] jointTransforms; // assign 33 transforms in Inspector
 
     async void Start() {
-        websocket = new WebSocket(serverUrl);
+        Debug.Log("Unity client starts!");
+        try
+        {
+            websocket = new WebSocket(serverUrl);
 
-        websocket.OnOpen += () => {
-            Debug.Log("WebSocket connected");
-        };
-        websocket.OnError += (e) => {
-            Debug.LogError("WebSocket Error: " + e);
-        };
-        websocket.OnClose += (e) => {
-            Debug.Log("WebSocket closed: " + e);
-        };
-        websocket.OnMessage += (bytes) => {
-            string msg = System.Text.Encoding.UTF8.GetString(bytes);
-            HandleMessage(msg);
-        };
+            websocket.OnOpen += () => {
+                Debug.Log($"WebSocket connected {serverUrl}");
+            };
+            websocket.OnError += (e) => {
+                Debug.LogError("WebSocket Error: " + e);
+            };
+            websocket.OnClose += (e) => {
+                Debug.Log("WebSocket closed: " + e);
+            };
+            websocket.OnMessage += (bytes) => {
+                string msg = System.Text.Encoding.UTF8.GetString(bytes);
+                HandleMessage(msg);
+            };
 
-        await websocket.Connect();
-    }
-
-    private void HandleMessage(string msg) {
-        try {
-            PoseMessage pm = JsonUtility.FromJson<PoseMessage>(msg);
-            if (pm.pose_world_landmarks != null) {
-                UpdateJoints(pm.pose_world_landmarks);
-            }
-        } catch (Exception ex) {
-            Debug.LogWarning("JSON parse error: " + ex.Message);
+            Debug.Log("Connecting to " + serverUrl + " ...");
+            await websocket.Connect();
+        }
+        catch (Exception ex)
+        {
+            Debug.LogError("Failed to start WebSocket: " + ex.Message);
         }
     }
 
+    private void HandleMessage(string msg)
+    {
+        try {
+            PoseMessage poseMsg = JsonUtility.FromJson<PoseMessage>(msg);
+
+            if (poseMsg.pose_world_landmarks != null && poseMsg.pose_world_landmarks.Count > 0)
+            {
+                var first = poseMsg.pose_world_landmarks[0];
+                Debug.Log($"[PoseReceiver] Received pose_world_landmarks. First landmark: id={first.id} x={first.x:F3} y={first.y:F3} z={first.z:F3}");
+
+                UpdateJoints(poseMsg.pose_world_landmarks);
+            }
+            else
+            {
+                Debug.Log("[PoseReceiver] No pose_world_landmarks found in message");
+            }
+        }
+        catch (Exception ex) {
+            Debug.LogWarning("JSON parse error: " + ex.Message);
+        }
+    }
     private void UpdateJoints(List<Landmark> landmarks) {
+        if (jointTransforms == null || jointTransforms.Length == 0) return;
+
         foreach (var lm in landmarks) {
             int idx = lm.id;
             if (idx < jointTransforms.Length && jointTransforms[idx] != null) {
-                // convert from meter space / normalized space to Unity units
-                // Example simple mapping:
                 Vector3 pos = new Vector3(lm.x, lm.y, -lm.z);
                 jointTransforms[idx].localPosition = pos;
             }
@@ -73,7 +93,7 @@ public class PoseReceiver : MonoBehaviour {
 
     void Update() {
         #if !UNITY_WEBGL || UNITY_EDITOR
-            websocket.DispatchMessageQueue();
+            websocket?.DispatchMessageQueue();
         #endif
     }
 }
