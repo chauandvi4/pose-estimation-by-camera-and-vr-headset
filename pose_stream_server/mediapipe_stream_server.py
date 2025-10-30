@@ -1,5 +1,5 @@
 """
-pose_stream_server.py
+mediapipe_stream_server.py
 - Captures frames from a camera using OpenCV
 - Runs MediaPipe Pose
 - Broadcasts landmarks to connected WebSocket clients as JSON
@@ -21,7 +21,7 @@ CAM_INDEX = 0
 MODEL_COMPLEXITY = 1 # 0,1,2 (higher -> more accurate/slower)
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("pose_stream_server")
+logger = logging.getLogger("mediapipe_stream_server")
 
 # Set up MediaPipe
 mp_drawing = mp.solutions.drawing_utils
