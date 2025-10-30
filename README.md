@@ -16,14 +16,16 @@ It allows you to:
 ## Installation
 
 1. Setup Python env:
+Requires Python >=3.9
+
 ```
-python3 -m venv .venv
-source .venv/bin/activate
+python -m venv .venv
+pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-2. Run Python server:
+2. Run MediaPipe server:
 ```
-python pose_stream_server/pose_stream_server.py
+python pose_stream_server/mediapipe_stream_server.py
 ```
 
