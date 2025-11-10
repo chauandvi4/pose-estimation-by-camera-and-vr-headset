@@ -2,7 +2,8 @@
 real_time_synthpose.py
 
 Ready-to-run script for real-time pose estimation using the SynthPose (HRNet-48) model
-from Hugging Face / MMPose. Features:
+from Hugging Face / MMPose. The model predicts the full 52-keypoint SynthPose
+skeletal layout directly from a live camera stream. Features:
 - OpenCV webcam capture
 - MMPoseInferencer integration (uses model you point to)
 - GPU / CPU fallback
@@ -17,20 +18,22 @@ Notes:
 """
 
 import argparse
-import os
-import sys
-import time
-import threading
-import queue
 import csv
+import os
+import queue
+import sys
 import tempfile
+import threading
+import time
 import traceback
 from pathlib import Path
+
 import cv2
+import numpy as np
 import torch
 from huggingface_hub import snapshot_download
+
 try:
-    
     from mmpose.apis import MMPoseInferencer
 except Exception:
     MMPoseInferencer = None
@@ -99,11 +102,6 @@ def draw_keypoints(frame, preds, threshold=0.25):
     """Draw keypoints returned by MMPose. preds expected as Nx3 array-like: (x, y, score)
     or a list of arrays per person. We'll handle common shapes.
     """
-    try:
-        import numpy as np
-    except Exception:
-        return frame
-
     if preds is None:
         return frame
 
@@ -119,10 +117,7 @@ def draw_keypoints(frame, preds, threshold=0.25):
     for person in people:
         arr = None
         try:
-            arr = person
-            # try to convert to numpy
-            import numpy as np
-            arr = np.array(arr)
+            arr = np.array(person)
         except Exception:
             continue
         if arr.ndim != 2 or arr.shape[1] < 2:
@@ -143,19 +138,45 @@ def draw_keypoints(frame, preds, threshold=0.25):
     return frame
 
 
-def flatten_keypoints(preds):
+def flatten_keypoints(preds, max_people=1):
     """Return a flat list of numbers from preds (x,y,score per keypoint) or empty list if none."""
     if preds is None:
         return []
-    import numpy as np
     if isinstance(preds, (list, tuple)) and len(preds) > 0 and hasattr(preds[0], '__len__'):
-        # assume first person only for logging
-        arr = np.array(preds[0])
+        # clip to desired number of people for logging
+        clipped = preds[:max_people]
+        arr = np.array(clipped)
+        if arr.ndim == 3:
+            arr = arr.reshape(-1, arr.shape[-1])
     else:
         arr = np.array(preds)
     if arr.ndim == 2:
         return arr.flatten().tolist()
     return []
+
+
+def extract_predictions(result):
+    """Best-effort extraction of keypoints from a result dictionary or sequence."""
+    if result is None:
+        return None
+
+    if isinstance(result, dict):
+        for key in (
+            'preds',
+            'preds_2d',
+            'keypoint',
+            'preds_xywh',
+            'preds_vis',
+        ):
+            if key in result and result[key] is not None:
+                return result[key]
+        # Some inferencers wrap predictions in deeper structures
+        if 'instances' in result and isinstance(result['instances'], dict):
+            inst = result['instances']
+            for key in ('preds', 'keypoints', 'pred_keypoints'):
+                if key in inst:
+                    return inst[key]
+    return result
 
 
 def main():
@@ -168,6 +189,7 @@ def main():
     parser.add_argument('--display-scale', type=float, default=1.0, help='Scale factor for display window')
     parser.add_argument('--skip-frames', type=int, default=0, help='Skip N frames between inferences (0 = process every frame)')
     parser.add_argument('--score-threshold', type=float, default=0.25, help='Keypoint score threshold to visualize')
+    parser.add_argument('--max-people-log', type=int, default=1, help='Number of people to log keypoints for (flattened)')
     args = parser.parse_args()
 
     # device selection
@@ -225,13 +247,10 @@ def main():
     # Prepare CSV logging
     csv_file = open(args.out_csv, 'w', newline='')
     csv_writer = csv.writer(csv_file)
-    header = ['timestamp', 'frame_index'] + [f'kp_{i}_{c}' for i in range(2000) for c in ('x', 'y', 's')]
-    # We don't know how many keypoints; we'll write header minimally. We'll write rows with variable length.
     csv_writer.writerow(['timestamp', 'frame_index', 'num_keypoints', 'keypoints_flat'])
     csv_file.flush()
 
     frame_idx = 0
-    last_infer_time = 0
     temp_dir = tempfile.mkdtemp(prefix='synthpose_tmp_')
     print('Temporary dir for fallback images:', temp_dir)
 
@@ -283,22 +302,7 @@ def main():
                     r0 = res_gen
 
                 # r0 expected to be a dict with keys like 'preds' or 'preds_2d'
-                if isinstance(r0, dict):
-                    if 'preds' in r0:
-                        preds = r0['preds']
-                    elif 'preds_2d' in r0:
-                        preds = r0['preds_2d']
-                    elif 'keypoint' in r0:
-                        preds = r0['keypoint']
-                    else:
-                        # try to inspect
-                        for k in ('preds', 'preds_2d', 'keypoint', 'preds_xywh'):
-                            if k in r0:
-                                preds = r0[k]
-                                break
-                else:
-                    # Unknown format: try to use as-is
-                    preds = r0
+                preds = extract_predictions(r0)
 
             except TypeError as e:
                 # Probably inferencer doesn't accept numpy arrays. Fall back to temp file approach.
@@ -312,10 +316,7 @@ def main():
                         r0 = res_list[0] if len(res_list) > 0 else None
                     else:
                         r0 = res_gen
-                    if isinstance(r0, dict):
-                        preds = r0.get('preds') or r0.get('preds_2d') or r0.get('keypoint')
-                    else:
-                        preds = r0
+                    preds = extract_predictions(r0)
                 except Exception as e2:
                     print('Fallback inferencer call failed:', e2)
                     preds = None
@@ -325,7 +326,6 @@ def main():
                 preds = None
 
             infer_time = time.time() - start
-            last_infer_time = infer_time
 
             # Visualization
             vis_frame = frame.copy()
@@ -338,7 +338,7 @@ def main():
 
             # Logging: write timestamp, frame_index, number of kps and flattened list as one CSV column
             try:
-                flat = flatten_keypoints(preds)
+                flat = flatten_keypoints(preds, max_people=args.max_people_log)
                 csv_writer.writerow([ts, frame_idx, len(flat) // 3 if flat else 0, flat])
                 csv_file.flush()
             except Exception as e:
