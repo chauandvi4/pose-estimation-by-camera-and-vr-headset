@@ -16,7 +16,7 @@ It allows you to:
 ## Installation
 
 1. Setup Python env:
-Requires Python >=3.9
+Requires Python >=3.10
 
 ```
 python -m venv .venv
