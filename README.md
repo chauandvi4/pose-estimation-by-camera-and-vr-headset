@@ -2,7 +2,7 @@
 
 ## Getting started
 
-This is a hybrid framework for human body pose estimation using **MediaPipe** and external cameras, synchronized with **Meta Quest** tracking data for VR applications.
+This is a hybrid framework for human body pose estimation using **MediaPipe**, **SynthPose MMPose** and external cameras, synchronized with **Meta Quest** tracking data for VR applications.
 
 It allows you to:
 - Estimate full-body pose with MediaPipe on a PC server.

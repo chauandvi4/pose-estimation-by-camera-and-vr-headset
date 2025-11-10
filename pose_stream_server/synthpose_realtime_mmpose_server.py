@@ -11,9 +11,6 @@ from Hugging Face / MMPose. Features:
 - Logging of keypoints to CSV (timestamp, frame_index, flattened keypoints)
 - Graceful handling if inferencer only accepts filenames (falls back to temp file per frame)
 
-Usage:
-  python real_time_synthpose.py --repo stanfordmimi/synthpose-hrnet-48-mmpose --device auto
-
 Notes:
 - You must have MMPose and its dependencies installed. See MMPose docs if you run into import errors.
 - The script tries to call MMPoseInferencer with numpy frames. If that fails, it falls back to writing a temporary image file per frame and passing the filename.
