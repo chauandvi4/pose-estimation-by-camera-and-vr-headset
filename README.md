@@ -6,9 +6,22 @@ This is a hybrid framework for human body pose estimation using **MediaPipe**, *
 
 It allows you to:
 - Estimate full-body pose with MediaPipe on a PC server.
-- Stream 3D joint data over WebSocket/UDP.
+- Stream 3D joint data over UDP/OSC.
 - Receive and apply that pose to a VR avatar in Unity on Meta Quest.
 - Fuse headset and MediaPipe data for more accurate tracking.
+
+## Data flow at a glance
+
+1. **Meta Quest → Unity.** Quest Link supplies accurate HMD pose + arm joints
+   (via OpenXR/Movement SDK). This data is complete for the upper body but the
+   lower body is only heuristically estimated.
+2. **Unity → Python.** `OscPoseSender` (or the `OscPoseSenderStub`) ships the
+   Quest joints over OSC. Each packet contains pose, rotation, timestamps, and
+   per-joint metadata so the Python side always knows where the upper body is.
+3. **Python → MediaPipe.** `mediapipe_stream_server.py` runs MediaPipe Pose from
+   a webcam. The script extracts the lower-body landmarks and stores them next
+   to the Unity packet log in a shared "fusion workspace" so that both streams
+   can be blended in one place.
 
 ## System Architecture
 
@@ -24,10 +37,102 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-2. Run MediaPipe server:
+2. Run the MediaPipe + OSC fusion workspace:
 ```
-python pose_stream_server/mediapipe_stream_server.py
+python pose_stream_server/mediapipe_stream_server.py --osc-port 9000
 ```
+
+   This process now does two things simultaneously:
+
+   * Captures MediaPipe Pose frames and logs the lower-body (hips → toes).
+   * Listens for Unity OSC packets on `--osc-port` and stores the Quest
+     upper-body pose in the same `FusionWorkspace` instance.
+
+   When both feeds are live the log prints a message similar to:
+
+   ```text
+   INFO:pose_stream_server.mediapipe_stream_server:Fusion workspace ready (Quest ts=..., MediaPipe ts=..., Δ=...s) — this is the hook for blending the two bodies.
+   ```
+
+   That log entry is the first step of the fusion layer: both upper-body
+   (Quest) and lower-body (MediaPipe) data are now visible inside one module.
+
+3. (Optional) Run the OSC receiver bridge to capture Unity packets without a headset:
+```
+python pose_stream_server/osc_pose_receiver.py --host 0.0.0.0 --port 9000
+```
+
+   This listener prints the JSON payload emitted by the Unity ``OscPoseSender``
+   and ``OscPoseSenderStub`` components. It is useful for validating the
+   transport layer before wiring the Quest hardware or MediaPipe fusion logic.
+
+## End-to-end OSC smoke test (Unity ↔ Python)
+
+The following steps let you exercise the OSC transport loop even on a macOS
+laptop without a connected Quest. The Unity scene will use the
+``OscPoseSenderStub`` component, which emits synthetic head motion so that
+packets continue to flow.
+
+1. **Start the Python OSC receiver.**
+
+   ```bash
+   python pose_stream_server/osc_pose_receiver.py --host 0.0.0.0 --port 9000
+   ```
+
+   Expected result: the terminal prints ``Listening for OSC pose packets on``
+   ``udp://0.0.0.0:9000``. No packets appear yet because Unity is not running.
+
+2. **Open the Unity project.**
+
+   * Launch Unity Hub and add the ``unity_client`` folder as a project.
+   * Open the project with Unity 2021.3 LTS or newer.
+
+   Expected result: the editor loads the sample scene. There is no play-mode
+   output yet.
+
+3. **Configure ``OscPoseSenderStub`` in the scene (only required once).**
+
+   * Create an empty GameObject (e.g. ``OSC Pose Sender``).
+   * Attach the ``OscPoseSenderStub`` script located under ``Assets/Scripts``.
+   * In the Inspector, set **Remote Host** to ``127.0.0.1`` and **Remote Port**
+     to ``9000`` so the component targets the local Python listener.
+   * Leave **Simulate Hmd When Unavailable** enabled so the script generates
+     fake HMD poses.
+
+   Expected result: the component shows runtime-only fields for the HMD pose
+   but stays idle while the scene is stopped.
+
+4. **Enter Play Mode in Unity.**
+
+   * Press the **Play** button in the Unity Editor.
+
+   Expected result: the Game view runs. Because the stub is active, the
+   component emits simulated head data at ~60 Hz.
+
+5. **Observe OSC packets on the Python side.**
+
+   The terminal running ``osc_pose_receiver.py`` begins logging packets such as:
+
+   ```text
+   INFO:__main__:Packet from ('127.0.0.1', 54321) timestamp=1700000000.123 hmd=(0.001, 1.602, -0.048) yaw=2.1
+   ```
+
+   * ``timestamp`` is the Unity wall-clock time (seconds since epoch).
+   * ``hmd`` shows the simulated head position in meters.
+   * ``yaw`` oscillates as the simulated head rotates left/right.
+
+6. **Stop Play Mode.**
+
+   * Click **Play** again in Unity to exit play mode.
+
+   Expected result: Unity stops sending packets. The Python receiver continues
+   running but no new log lines appear until Unity re-enters play mode. Press
+   ``Ctrl+C`` in the terminal when you are done to stop the receiver.
+
+At this point you have verified the OSC communication loop between Unity and
+Python. Once Quest hardware is available, swap the stub for the production
+``OscPoseSender`` script and supply real joint bindings for the avatar
+hierarchy without changing the network plumbing.
 
 3. (Optional) Run the OSC receiver bridge to capture Unity packets without a headset:
 ```

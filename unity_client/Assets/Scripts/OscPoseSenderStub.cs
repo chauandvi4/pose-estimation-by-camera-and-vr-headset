@@ -3,13 +3,13 @@ using System.Collections.Generic;
 using System.Net.Sockets;
 using System.Text;
 using UnityEngine;
-using UnityEngine.XR;
 
 /// <summary>
-/// Collects Quest HMD/upper-body joint poses and streams them as a JSON payload
-/// wrapped inside an OSC message over UDP.
+/// Emits synthetic or author-supplied poses so the OSC transport can be tested
+/// without a connected XR device. The JSON payload matches the production
+/// <see cref="OscPoseSender"/> so downstream tooling can be validated.
 /// </summary>
-public class OscPoseSender : MonoBehaviour
+public class OscPoseSenderStub : MonoBehaviour
 {
     [Serializable]
     public class JointBinding
@@ -44,7 +44,7 @@ public class OscPoseSender : MonoBehaviour
     public class PosePacket
     {
         public double timestamp;
-        public string source = "meta_quest";
+        public string source = "stub";
         public string space = "world";
         public PoseSample hmd;
         public bool rootTracked;
@@ -58,9 +58,22 @@ public class OscPoseSender : MonoBehaviour
     [SerializeField] private string oscAddress = "/quest/upper_body";
 
     [Header("Pose Sources")]
-    [SerializeField] private Transform rootTransform;
-    [SerializeField] private Transform hmdFallback;
-    [SerializeField] private JointBinding[] torsoAndArmJoints;
+    [SerializeField, Tooltip("Optional transform to send as the avatar root.")]
+    private Transform rootTransform;
+    [SerializeField, Tooltip("Optional transform to use as the HMD sample.")]
+    private Transform hmdTransform;
+    [SerializeField, Tooltip("Optional transforms for torso/arm joints to include in the packet.")]
+    private JointBinding[] torsoAndArmJoints;
+
+    [Header("Simulation")]
+    [SerializeField, Tooltip("Generate a synthetic head pose when no transform is provided.")]
+    private bool simulateHmdWhenUnavailable = true;
+    [SerializeField, Tooltip("Base position offset for the simulated HMD pose in meters.")]
+    private Vector3 simulatedHmdOffset = new Vector3(0f, 1.6f, 0f);
+    [SerializeField, Tooltip("Oscillation amplitude for the simulated HMD pose in meters.")]
+    private Vector3 simulatedHmdAmplitude = new Vector3(0.05f, 0.02f, 0.05f);
+    [SerializeField, Tooltip("Oscillation amplitude for the simulated HMD yaw in degrees.")]
+    private float simulatedYawAmplitude = 15f;
 
     [Header("Send Rate")]
     [SerializeField, Tooltip("How often to send packets (seconds)."), Min(0.001f)]
@@ -68,7 +81,6 @@ public class OscPoseSender : MonoBehaviour
 
     private UdpClient udpClient;
     private double lastSendTime;
-    private bool loggedMissingHmd;
 
     private void Awake()
     {
@@ -98,18 +110,10 @@ public class OscPoseSender : MonoBehaviour
             return;
         }
 
-        if (!TryGetHmdPose(out Pose hmdPose))
+        if (!TryGetHmdPose(now, out Pose hmdPose))
         {
-            if (!loggedMissingHmd)
-            {
-                Debug.LogWarning("OscPoseSender: Unable to acquire HMD pose. Ensure the Quest is connected or assign an HMD fallback transform.");
-                loggedMissingHmd = true;
-            }
-
-            return; // Without a valid HMD pose we skip the packet to keep downstream data clean.
+            return;
         }
-
-        loggedMissingHmd = false;
 
         PosePacket packet = BuildPacket(hmdPose);
         string json = JsonUtility.ToJson(packet);
@@ -122,7 +126,7 @@ public class OscPoseSender : MonoBehaviour
         }
         catch (Exception ex)
         {
-            Debug.LogWarning($"OSC send failed: {ex.Message}");
+            Debug.LogWarning($"OscPoseSenderStub: OSC send failed: {ex.Message}");
         }
     }
 
@@ -176,16 +180,17 @@ public class OscPoseSender : MonoBehaviour
         return packet;
     }
 
-    private bool TryGetHmdPose(out Pose pose)
+    private bool TryGetHmdPose(double sampleTime, out Pose pose)
     {
-        if (TryGetDevicePose(XRNode.Head, out pose))
+        if (hmdTransform != null)
         {
+            pose = new Pose(hmdTransform.position, hmdTransform.rotation);
             return true;
         }
 
-        if (hmdFallback != null)
+        if (simulateHmdWhenUnavailable)
         {
-            pose = new Pose(hmdFallback.position, hmdFallback.rotation);
+            pose = GenerateSimulatedHmdPose(sampleTime);
             return true;
         }
 
@@ -193,19 +198,22 @@ public class OscPoseSender : MonoBehaviour
         return false;
     }
 
-    private static bool TryGetDevicePose(XRNode node, out Pose pose)
+    private Pose GenerateSimulatedHmdPose(double sampleTime)
     {
-        InputDevice device = InputDevices.GetDeviceAtXRNode(node);
-        if (device.isValid &&
-            device.TryGetFeatureValue(CommonUsages.devicePosition, out Vector3 position) &&
-            device.TryGetFeatureValue(CommonUsages.deviceRotation, out Quaternion rotation))
-        {
-            pose = new Pose(position, rotation);
-            return true;
-        }
+        float t = (float)sampleTime;
+        Vector3 position = simulatedHmdOffset + new Vector3(
+            Mathf.Sin(t) * simulatedHmdAmplitude.x,
+            Mathf.Sin(t * 0.5f + Mathf.PI / 4f) * simulatedHmdAmplitude.y,
+            Mathf.Cos(t) * simulatedHmdAmplitude.z
+        );
 
-        pose = Pose.identity;
-        return false;
+        Quaternion rotation = Quaternion.Euler(
+            0f,
+            Mathf.Sin(t * 0.7f) * simulatedYawAmplitude,
+            0f
+        );
+
+        return new Pose(position, rotation);
     }
 
     private static byte[] BuildOscMessage(string address, string stringPayload)
