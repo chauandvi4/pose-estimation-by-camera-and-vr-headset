@@ -29,3 +29,12 @@ pip install -r requirements.txt
 python pose_stream_server/mediapipe_stream_server.py
 ```
 
+3. (Optional) Run the OSC receiver bridge to capture Unity packets without a headset:
+```
+python pose_stream_server/osc_pose_receiver.py --host 0.0.0.0 --port 9000
+```
+
+   This listener prints the JSON payload emitted by the Unity ``OscPoseSender``
+   component. It is useful for validating the transport layer before wiring the
+   Quest hardware or MediaPipe fusion logic.
+
