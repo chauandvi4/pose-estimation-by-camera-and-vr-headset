@@ -1,49 +1,147 @@
+"""MediaPipe capture loop that shares a workspace with Unity OSC packets.
+
+This module replaces the legacy WebSocket broadcaster with a small "fusion
+workspace" that receives two asynchronous feeds:
+
+1. Upper-body data from Unity over OSC (Quest HMD, torso, and arm joints).
+2. Lower-body landmarks from MediaPipe Pose running on a standard webcam.
+
+Both feeds are logged from the same process so that future work can combine
+(lower-body, MediaPipe) + (upper-body, Quest) into a single, fused skeleton.
 """
-mediapipe_stream_server.py
-- Captures frames from a camera using OpenCV
-- Runs MediaPipe Pose
-- Broadcasts landmarks to connected WebSocket clients as JSON
-"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import contextlib
+import logging
+import time
+from dataclasses import dataclass
+from typing import Dict, Mapping, MutableMapping, Optional
 
 import cv2
 import mediapipe as mp
 
-import websockets
-import asyncio
-import json
-import logging
-from typing import Set
+from pose_stream_server import osc_pose_receiver
 
-# CONFIG
-WEBSOCKET_HOST = "0.0.0.0"
-WEBSOCKET_PORT = 8765
-CAM_INDEX = 0 
-MODEL_COMPLEXITY = 1 # 0,1,2 (higher -> more accurate/slower)
+logger = logging.getLogger(__name__)
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("mediapipe_stream_server")
-
-# Set up MediaPipe
-mp_drawing = mp.solutions.drawing_utils
-mp_drawing_styles = mp.solutions.drawing_styles
 mp_pose = mp.solutions.pose
-
 pose = mp_pose.Pose(
     static_image_mode=False,
-    model_complexity=MODEL_COMPLEXITY, 
+    model_complexity=1,
     enable_segmentation=False,
     min_detection_confidence=0.5,
-    min_tracking_confidence=0.5
+    min_tracking_confidence=0.5,
 )
 
-# Connected websocket clients
-connected_clients: Set[websockets.WebSocketServerProtocol] = set()
+LOWER_BODY_LANDMARKS = [
+    mp_pose.PoseLandmark.LEFT_HIP,
+    mp_pose.PoseLandmark.RIGHT_HIP,
+    mp_pose.PoseLandmark.LEFT_KNEE,
+    mp_pose.PoseLandmark.RIGHT_KNEE,
+    mp_pose.PoseLandmark.LEFT_ANKLE,
+    mp_pose.PoseLandmark.RIGHT_ANKLE,
+    mp_pose.PoseLandmark.LEFT_HEEL,
+    mp_pose.PoseLandmark.RIGHT_HEEL,
+    mp_pose.PoseLandmark.LEFT_FOOT_INDEX,
+    mp_pose.PoseLandmark.RIGHT_FOOT_INDEX,
+]
 
-async def video_loop():
-    cap = cv2.VideoCapture(CAM_INDEX)
-    
+
+@dataclass
+class MediaPipeSnapshot:
+    timestamp: float
+    landmarks: Mapping[str, Mapping[str, float]]
+
+
+class FusionWorkspace:
+    """Central rendezvous point for Unity OSC packets and MediaPipe landmarks."""
+
+    def __init__(self) -> None:
+        self.latest_upper_body: Optional[Mapping[str, object]] = None
+        self.latest_lower_body: Optional[MediaPipeSnapshot] = None
+
+    # ------------------------------------------------------------------
+    # Unity / OSC callbacks
+    # ------------------------------------------------------------------
+    def handle_quest_packet(self, packet: Mapping[str, object], addr) -> None:
+        self.latest_upper_body = packet
+        timestamp = packet.get("timestamp")
+        joint_count = len(packet.get("joints", []) or [])
+        logger.info(
+            "Unity OSC packet from %s @ %.3f with %d joints", addr, timestamp, joint_count
+        )
+        self._log_workspace_state()
+
+    # ------------------------------------------------------------------
+    # MediaPipe callbacks
+    # ------------------------------------------------------------------
+    def update_lower_body(self, snapshot: MediaPipeSnapshot) -> None:
+        self.latest_lower_body = snapshot
+        hips = snapshot.landmarks.get("left_hip") or snapshot.landmarks.get("right_hip")
+        if hips:
+            logger.info(
+                "MediaPipe lower body @ %.3f hip=(%.3f, %.3f, %.3f)",
+                snapshot.timestamp,
+                hips.get("x", 0.0),
+                hips.get("y", 0.0),
+                hips.get("z", 0.0),
+            )
+        else:
+            logger.info("MediaPipe lower body @ %.3f (hips not visible)", snapshot.timestamp)
+        self._log_workspace_state()
+
+    # ------------------------------------------------------------------
+    def _log_workspace_state(self) -> None:
+        """Log when both streams are live to highlight the fusion rendezvous."""
+
+        if not self.latest_upper_body or not self.latest_lower_body:
+            return
+
+        quest_ts = float(self.latest_upper_body.get("timestamp", 0.0))
+        mediapipe_ts = self.latest_lower_body.timestamp
+        delta = mediapipe_ts - quest_ts
+
+        logger.info(
+            "Fusion workspace ready (Quest ts=%.3f, MediaPipe ts=%.3f, Δ=%.3fs) — this is the hook for blending the two bodies.",
+            quest_ts,
+            mediapipe_ts,
+            delta,
+        )
+
+
+# ----------------------------------------------------------------------
+# MediaPipe helpers
+# ----------------------------------------------------------------------
+
+def _landmark_dict(landmark) -> Dict[str, float]:
+    return {
+        "x": float(landmark.x),
+        "y": float(landmark.y),
+        "z": float(landmark.z),
+        "visibility": float(getattr(landmark, "visibility", 0.0)),
+    }
+
+
+def extract_lower_body(results) -> Optional[MediaPipeSnapshot]:
+    if not (results.pose_landmarks and results.pose_world_landmarks):
+        return None
+
+    world_landmarks = results.pose_world_landmarks.landmark
+    output: MutableMapping[str, Mapping[str, float]] = {}
+    for landmark_enum in LOWER_BODY_LANDMARKS:
+        idx = landmark_enum.value
+        output[landmark_enum.name.lower()] = _landmark_dict(world_landmarks[idx])
+
+    return MediaPipeSnapshot(timestamp=time.time(), landmarks=dict(output))
+
+
+async def mediapipe_loop(camera_index: int, workspace: FusionWorkspace) -> None:
+    cap = cv2.VideoCapture(camera_index)
     if not cap.isOpened():
-        logger.error("Cannot open camera index %s", CAM_INDEX)
+        logger.error("Cannot open camera index %s", camera_index)
         return
 
     try:
@@ -54,81 +152,69 @@ async def video_loop():
                 await asyncio.sleep(0.1)
                 continue
 
-            # To improve performance, optionally mark the image as not writeable to pass by reference.
             image.flags.writeable = False
             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             results = pose.process(image)
-            
-            #Sending landmarks to connected websocket clients
-            landmarks_out = None
-            if results.pose_landmarks and results.pose_world_landmarks:
-                landmarks_out = []
-                world_out = []
-                for idx, (lm_img, lm_world) in enumerate(zip(results.pose_landmarks.landmark, results.pose_world_landmarks.landmark)):
-                    landmarks_out.append({
-                        "id": idx,
-                        "x": float(lm_img.x),
-                        "y": float(lm_img.y),
-                        "z": float(lm_img.z),
-                        "visibility": float(lm_img.visibility)
-                    })
-                    world_out.append({
-                        "id": idx,
-                        "x": float(lm_world.x),
-                        "y": float(lm_world.y),
-                        "z": float(lm_world.z),
-                        "visibility": float(lm_img.visibility)
-                    })
 
-                payload = json.dumps({
-                    "timestamp": asyncio.get_event_loop().time(),
-                    "pose_landmarks": landmarks_out,
-                    "pose_world_landmarks": world_out
-                })
+            snapshot = extract_lower_body(results)
+            if snapshot:
+                workspace.update_lower_body(snapshot)
 
-                # Broadcast
-                if connected_clients:
-                    await asyncio.wait([client.send(payload) for client in connected_clients])
-
-            # Draw the pose annotation on the image.
             image.flags.writeable = True
             image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-            mp_drawing.draw_landmarks(
+            mp.solutions.drawing_utils.draw_landmarks(
                 image,
                 results.pose_landmarks,
                 mp_pose.POSE_CONNECTIONS,
-                landmark_drawing_spec=mp_drawing_styles.get_default_pose_landmarks_style())
-            # Flip the image horizontally for a selfie-view display.
-            cv2.imshow('MediaPipe Pose', cv2.flip(image, 1))
+                landmark_drawing_spec=mp.solutions.drawing_styles.get_default_pose_landmarks_style(),
+            )
+            cv2.imshow("MediaPipe Pose", cv2.flip(image, 1))
             if cv2.waitKey(5) & 0xFF == 27:
+                logger.info("ESC pressed, stopping MediaPipe loop")
                 break
+
+            await asyncio.sleep(0)
     finally:
         cap.release()
         cv2.destroyAllWindows()
 
-async def ws_handler(ws, path):
-    logger.info("Client connected: %s", ws.remote_address)
-    connected_clients.add(ws)
+
+# ----------------------------------------------------------------------
+# CLI entrypoint
+# ----------------------------------------------------------------------
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--camera-index", type=int, default=0, help="OpenCV camera index (default: 0)")
+    parser.add_argument("--osc-host", default="0.0.0.0", help="Interface for Unity OSC packets (default: 0.0.0.0)")
+    parser.add_argument("--osc-port", type=int, default=9000, help="UDP port for Unity OSC packets (default: 9000)")
+    parser.add_argument("--log-level", default="INFO", help="Logging level (default: INFO)")
+    return parser.parse_args()
+
+
+async def async_main(args: argparse.Namespace) -> None:
+    workspace = FusionWorkspace()
+    osc_task = asyncio.create_task(
+        osc_pose_receiver.run_server(args.osc_host, args.osc_port, workspace.handle_quest_packet)
+    )
+
     try:
-        # Keep connection open as we don't expect messages from clients right now
-        async for message in ws:
-            # TO-DO: Message received from clients can be handled here
-            logger.debug("Received from client: %s", message)
-    except websockets.exceptions.ConnectionClosed:
-        logger.info("Client disconnected: %s", ws.remote_address)
+        await mediapipe_loop(args.camera_index, workspace)
     finally:
-        connected_clients.remove(ws)
-        
-async def main():
-    server = await websockets.serve(ws_handler, WEBSOCKET_HOST, WEBSOCKET_PORT)
-    logger.info("WebSocket server listening on ws://%s:%s", WEBSOCKET_HOST, WEBSOCKET_PORT)
-    # Run video loop forever
-    await video_loop()
-    server.close()
-    await server.wait_closed()
+        osc_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await osc_task
+
+
+def main() -> None:
+    args = parse_args()
+    logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
+
+    try:
+        asyncio.run(async_main(args))
+    except KeyboardInterrupt:
+        logger.info("Shutting down MediaPipe + OSC fusion workspace")
+
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Shutting down server.")
+    main()

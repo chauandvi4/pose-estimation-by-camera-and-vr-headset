@@ -6,9 +6,22 @@ This is a hybrid framework for human body pose estimation using **MediaPipe**, *
 
 It allows you to:
 - Estimate full-body pose with MediaPipe on a PC server.
-- Stream 3D joint data over WebSocket/UDP.
+- Stream 3D joint data over UDP/OSC.
 - Receive and apply that pose to a VR avatar in Unity on Meta Quest.
 - Fuse headset and MediaPipe data for more accurate tracking.
+
+## Data flow at a glance
+
+1. **Meta Quest → Unity.** Quest Link supplies accurate HMD pose + arm joints
+   (via OpenXR/Movement SDK). This data is complete for the upper body but the
+   lower body is only heuristically estimated.
+2. **Unity → Python.** `OscPoseSender` (or the `OscPoseSenderStub`) ships the
+   Quest joints over OSC. Each packet contains pose, rotation, timestamps, and
+   per-joint metadata so the Python side always knows where the upper body is.
+3. **Python → MediaPipe.** `mediapipe_stream_server.py` runs MediaPipe Pose from
+   a webcam. The script extracts the lower-body landmarks and stores them next
+   to the Unity packet log in a shared "fusion workspace" so that both streams
+   can be blended in one place.
 
 ## System Architecture
 
@@ -24,10 +37,25 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-2. Run MediaPipe server:
+2. Run the MediaPipe + OSC fusion workspace:
 ```
-python pose_stream_server/mediapipe_stream_server.py
+python pose_stream_server/mediapipe_stream_server.py --osc-port 9000
 ```
+
+   This process now does two things simultaneously:
+
+   * Captures MediaPipe Pose frames and logs the lower-body (hips → toes).
+   * Listens for Unity OSC packets on `--osc-port` and stores the Quest
+     upper-body pose in the same `FusionWorkspace` instance.
+
+   When both feeds are live the log prints a message similar to:
+
+   ```text
+   INFO:pose_stream_server.mediapipe_stream_server:Fusion workspace ready (Quest ts=..., MediaPipe ts=..., Δ=...s) — this is the hook for blending the two bodies.
+   ```
+
+   That log entry is the first step of the fusion layer: both upper-body
+   (Quest) and lower-body (MediaPipe) data are now visible inside one module.
 
 3. (Optional) Run the OSC receiver bridge to capture Unity packets without a headset:
 ```
