@@ -7,8 +7,7 @@ using UnityEngine.XR;
 
 /// <summary>
 /// Collects Quest HMD/upper-body joint poses and streams them as a JSON payload
-/// wrapped inside an OSC message over UDP. This variant targets production use
-/// with an XR-connected Meta Quest device.
+/// wrapped inside an OSC message over UDP.
 /// </summary>
 public class OscPoseSender : MonoBehaviour
 {

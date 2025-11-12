@@ -1,10 +1,9 @@
 """Simple OSC receiver that ingests Unity upper-body pose packets.
 
-This utility listens for the JSON payload emitted by ``OscPoseSender`` and
-``OscPoseSenderStub`` and prints the decoded Quest/upper-body pose data. It is
-intended to provide a lightweight bridge between Unity and the Python fusion
-pipeline so that the communication layer can be validated without a connected
-headset.
+This utility listens for the JSON payload emitted by ``OscPoseSender`` or ``OscPoseSenderStub` and
+prints the decoded Quest/upper-body pose data. It is intended to provide a
+lightweight bridge between Unity and the Python fusion pipeline so that the
+communication layer can be validated without a connected headset.
 """
 
 from __future__ import annotations
