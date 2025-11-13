@@ -23,7 +23,17 @@ from typing import Dict, Mapping, MutableMapping, Optional
 import cv2
 import mediapipe as mp
 
-from pose_stream_server import osc_pose_receiver
+try:
+    from .osc_pose_receiver import run_server as start_osc_server
+except ImportError:
+    import sys
+    from pathlib import Path
+
+    package_root = Path(__file__).resolve().parent
+    project_root = package_root.parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    from pose_stream_server.osc_pose_receiver import run_server as start_osc_server  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -36,18 +46,7 @@ pose = mp_pose.Pose(
     min_tracking_confidence=0.5,
 )
 
-LOWER_BODY_LANDMARKS = [
-    mp_pose.PoseLandmark.LEFT_HIP,
-    mp_pose.PoseLandmark.RIGHT_HIP,
-    mp_pose.PoseLandmark.LEFT_KNEE,
-    mp_pose.PoseLandmark.RIGHT_KNEE,
-    mp_pose.PoseLandmark.LEFT_ANKLE,
-    mp_pose.PoseLandmark.RIGHT_ANKLE,
-    mp_pose.PoseLandmark.LEFT_HEEL,
-    mp_pose.PoseLandmark.RIGHT_HEEL,
-    mp_pose.PoseLandmark.LEFT_FOOT_INDEX,
-    mp_pose.PoseLandmark.RIGHT_FOOT_INDEX,
-]
+POSE_LANDMARKS = list(mp_pose.PoseLandmark)
 
 
 @dataclass
@@ -61,7 +60,7 @@ class FusionWorkspace:
 
     def __init__(self) -> None:
         self.latest_upper_body: Optional[Mapping[str, object]] = None
-        self.latest_lower_body: Optional[MediaPipeSnapshot] = None
+        self.latest_mediapipe: Optional[MediaPipeSnapshot] = None
 
     # ------------------------------------------------------------------
     # Unity / OSC callbacks
@@ -78,30 +77,35 @@ class FusionWorkspace:
     # ------------------------------------------------------------------
     # MediaPipe callbacks
     # ------------------------------------------------------------------
-    def update_lower_body(self, snapshot: MediaPipeSnapshot) -> None:
-        self.latest_lower_body = snapshot
+    def update_pose(self, snapshot: MediaPipeSnapshot) -> None:
+        self.latest_mediapipe = snapshot
         hips = snapshot.landmarks.get("left_hip") or snapshot.landmarks.get("right_hip")
         if hips:
             logger.info(
-                "MediaPipe lower body @ %.3f hip=(%.3f, %.3f, %.3f)",
+                "MediaPipe pose @ %.3f hip=(%.3f, %.3f, %.3f) (%d landmarks)",
                 snapshot.timestamp,
                 hips.get("x", 0.0),
                 hips.get("y", 0.0),
                 hips.get("z", 0.0),
+                len(snapshot.landmarks),
             )
         else:
-            logger.info("MediaPipe lower body @ %.3f (hips not visible)", snapshot.timestamp)
+            logger.info(
+                "MediaPipe pose @ %.3f (hips not visible, %d landmarks)",
+                snapshot.timestamp,
+                len(snapshot.landmarks),
+            )
         self._log_workspace_state()
 
     # ------------------------------------------------------------------
     def _log_workspace_state(self) -> None:
         """Log when both streams are live to highlight the fusion rendezvous."""
 
-        if not self.latest_upper_body or not self.latest_lower_body:
+        if not self.latest_upper_body or not self.latest_mediapipe:
             return
 
         quest_ts = float(self.latest_upper_body.get("timestamp", 0.0))
-        mediapipe_ts = self.latest_lower_body.timestamp
+        mediapipe_ts = self.latest_mediapipe.timestamp
         delta = mediapipe_ts - quest_ts
 
         logger.info(
@@ -125,13 +129,13 @@ def _landmark_dict(landmark) -> Dict[str, float]:
     }
 
 
-def extract_lower_body(results) -> Optional[MediaPipeSnapshot]:
+def extract_pose_landmarks(results) -> Optional[MediaPipeSnapshot]:
     if not (results.pose_landmarks and results.pose_world_landmarks):
         return None
 
     world_landmarks = results.pose_world_landmarks.landmark
     output: MutableMapping[str, Mapping[str, float]] = {}
-    for landmark_enum in LOWER_BODY_LANDMARKS:
+    for landmark_enum in POSE_LANDMARKS:
         idx = landmark_enum.value
         output[landmark_enum.name.lower()] = _landmark_dict(world_landmarks[idx])
 
@@ -156,9 +160,9 @@ async def mediapipe_loop(camera_index: int, workspace: FusionWorkspace) -> None:
             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             results = pose.process(image)
 
-            snapshot = extract_lower_body(results)
+            snapshot = extract_pose_landmarks(results)
             if snapshot:
-                workspace.update_lower_body(snapshot)
+                workspace.update_pose(snapshot)
 
             image.flags.writeable = True
             image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
@@ -195,7 +199,7 @@ def parse_args() -> argparse.Namespace:
 async def async_main(args: argparse.Namespace) -> None:
     workspace = FusionWorkspace()
     osc_task = asyncio.create_task(
-        osc_pose_receiver.run_server(args.osc_host, args.osc_port, workspace.handle_quest_packet)
+        start_osc_server(args.osc_host, args.osc_port, workspace.handle_quest_packet)
     )
 
     try:
