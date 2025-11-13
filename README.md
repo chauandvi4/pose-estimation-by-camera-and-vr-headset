@@ -19,9 +19,9 @@ It allows you to:
    Quest joints over OSC. Each packet contains pose, rotation, timestamps, and
    per-joint metadata so the Python side always knows where the upper body is.
 3. **Python → MediaPipe.** `mediapipe_stream_server.py` runs MediaPipe Pose from
-   a webcam. The script extracts the lower-body landmarks and stores them next
-   to the Unity packet log in a shared "fusion workspace" so that both streams
-   can be blended in one place.
+   a webcam. The script logs every MediaPipe world landmark (not just the lower
+   body) next to the Unity packet log in a shared "fusion workspace" so that
+   both streams can be blended in one place when the fusion logic is ready.
 
 ## System Architecture
 
@@ -37,16 +37,27 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-2. Run the MediaPipe + OSC fusion workspace:
+2. Run the MediaPipe + OSC fusion workspace (this process already hosts the OSC
+   server, so Unity can talk to it directly):
 ```
 python pose_stream_server/mediapipe_stream_server.py --osc-port 9000
 ```
 
    This process now does two things simultaneously:
 
-   * Captures MediaPipe Pose frames and logs the lower-body (hips → toes).
+   * Captures MediaPipe Pose frames and logs **all** of the detected landmarks
+     without filtering. The future fusion layer can then decide which joints to
+     merge.
    * Listens for Unity OSC packets on `--osc-port` and stores the Quest
      upper-body pose in the same `FusionWorkspace` instance.
+
+   > **Do I still need the standalone OSC receiver?** No. The
+   > `mediapipe_stream_server` internally launches the exact same OSC listener
+   > as soon as it starts. As long as Unity (or the `OscPoseSenderStub`) points
+   > to the same host/port, the MediaPipe process logs both the webcam and the
+   > Unity packets. The standalone ``python -m pose_stream_server.osc_pose_receiver``
+   > command is purely optional for debugging when you want to inspect OSC
+   > traffic without launching MediaPipe.
 
    When both feeds are live the log prints a message similar to:
 
@@ -55,16 +66,43 @@ python pose_stream_server/mediapipe_stream_server.py --osc-port 9000
    ```
 
    That log entry is the first step of the fusion layer: both upper-body
-   (Quest) and lower-body (MediaPipe) data are now visible inside one module.
+   (Quest) and full-body MediaPipe data are now visible inside one module.
 
 3. (Optional) Run the OSC receiver bridge to capture Unity packets without a headset:
-```
-python pose_stream_server/osc_pose_receiver.py --host 0.0.0.0 --port 9000
-```
+   ```
+   python -m pose_stream_server.osc_pose_receiver --host 0.0.0.0 --port 9000
+   ```
 
    This listener prints the JSON payload emitted by the Unity ``OscPoseSender``
    and ``OscPoseSenderStub`` components. It is useful for validating the
    transport layer before wiring the Quest hardware or MediaPipe fusion logic.
+
+## Verifying the fused logging (MediaPipe + Unity stub)
+
+Follow this checklist when you want to confirm that the MediaPipe process logs
+both sources without running a Quest headset:
+
+1. **Start the fusion workspace.**
+
+   ```bash
+   python pose_stream_server/mediapipe_stream_server.py --osc-port 9000
+   ```
+
+   Expected logs:
+
+   * `MediaPipe pose @ …` lines every time landmarks are detected by the
+     webcam.
+   * `Unity OSC packet …` entries whenever OSC data arrives.
+   * Once both streams are alive, `Fusion workspace ready (Quest ts=…, MediaPipe
+     ts=…, Δ=…)` confirming the rendezvous point for future blending.
+
+2. **In Unity, add the `OscPoseSenderStub` component** (see "End-to-end OSC
+   smoke test" below) and press **Play**. The stub emits simulated head/joint
+   poses that keep the MediaPipe log busy even without a headset.
+
+3. **Watch the Python terminal.** You should see alternating log entries from
+   both the camera loop and the OSC callback, verifying that everything is
+   recorded inside the same workspace.
 
 ## End-to-end OSC smoke test (Unity ↔ Python)
 
@@ -76,7 +114,7 @@ packets continue to flow.
 1. **Start the Python OSC receiver.**
 
    ```bash
-   python pose_stream_server/osc_pose_receiver.py --host 0.0.0.0 --port 9000
+   python -m pose_stream_server.osc_pose_receiver --host 0.0.0.0 --port 9000
    ```
 
    Expected result: the terminal prints ``Listening for OSC pose packets on``
@@ -111,7 +149,7 @@ packets continue to flow.
 
 5. **Observe OSC packets on the Python side.**
 
-   The terminal running ``osc_pose_receiver.py`` begins logging packets such as:
+   The terminal running ``python -m pose_stream_server.osc_pose_receiver`` begins logging packets such as:
 
    ```text
    INFO:__main__:Packet from ('127.0.0.1', 54321) timestamp=1700000000.123 hmd=(0.001, 1.602, -0.048) yaw=2.1
@@ -136,7 +174,7 @@ hierarchy without changing the network plumbing.
 
 3. (Optional) Run the OSC receiver bridge to capture Unity packets without a headset:
 ```
-python pose_stream_server/osc_pose_receiver.py --host 0.0.0.0 --port 9000
+python -m pose_stream_server.osc_pose_receiver --host 0.0.0.0 --port 9000
 ```
 
    This listener prints the JSON payload emitted by the Unity ``OscPoseSender``
